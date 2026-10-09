@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'pages/home_page.dart';
+import 'services/local_timer_service.dart';
 import 'services/storage_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await StorageService.init();
+  await LocalTimerService.instance.init();
   runApp(const SunloginApp());
 }
 

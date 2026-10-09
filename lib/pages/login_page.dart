@@ -5,6 +5,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../models/plug_models.dart';
 import '../services/storage_service.dart';
 import '../services/sunlogin_service.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'web_login_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -286,59 +287,94 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     );
   }
 
-  Future<void> _openWebLogin() async {
-    final success = await Navigator.push<bool>(
+  Future<void> _openWebLogin([String? url, String? title]) async {
+    final result = await Navigator.push<dynamic>(
       context,
-      MaterialPageRoute(builder: (_) => const WebLoginPage()),
+      MaterialPageRoute(
+        builder: (_) => WebLoginPage(
+          initialUrl: url,
+          initialRouteTitle: title,
+        ),
+      ),
     );
-    if (success == true && mounted) {
+    if (result == true && mounted) {
       _qrPollingTimer?.cancel();
       await _fetchDeviceList();
+    } else if (result == 'switchToQr' && mounted) {
+      _tabController.animateTo(1);
+      _startQrLogin();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已为您切换至双机扫码登录，使用另一设备或电脑扫码更稳定快捷'),
+          duration: Duration(seconds: 4),
+        ),
+      );
     }
   }
 
-  // 1. 独立 Tab：官方网页免扫码登录 (最推荐)
+  Future<void> _launchExternalBrowser(String url, String title) async {
+    final uri = Uri.parse(url);
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已调起外部浏览器访问【$title】\n登录完成后切回本 App 即可自动检测！'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('调起外部浏览器失败: $e')),
+        );
+      }
+    }
+  }
+
+  // 1. 独立 Tab：官方网页免扫码登录 (包含多线路切换)
   Widget _buildWebLoginTab(ThemeData theme) {
     return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       children: [
         // 核心卡片：内置极速免扫码登录
         Container(
           decoration: BoxDecoration(
             color: theme.colorScheme.primaryContainer.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(20),
             border: Border.all(
               color: theme.colorScheme.primary.withValues(alpha: 0.35),
-              width: 1.4,
+              width: 1.2,
             ),
           ),
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
                   Container(
-                    width: 44,
-                    height: 44,
+                    width: 42,
+                    height: 42,
                     decoration: BoxDecoration(
                       color: theme.colorScheme.primary,
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Icon(Icons.language_rounded, color: Colors.white, size: 24),
+                    child: const Icon(Icons.language_rounded, color: Colors.white, size: 22),
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          '官方免扫码登录',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                          '内置免扫码登录 (最推荐)',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                         ),
-                        const SizedBox(height: 3),
+                        const SizedBox(height: 2),
                         Text(
-                          '单台手机首选 · 登录后100%全自动秒进',
+                          '单台手机首选 · 支持验证码/密码 · 自动同步',
                           style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                         ),
                       ],
@@ -346,56 +382,124 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               Text(
-                '在 App 内直接打开贝锐向日葵官方认证中心，支持手机短信验证码、拼图密码或微信快捷登录。登录完成后系统将全自动捕获会话，无需手动跳转即可秒进设备列表！',
-                style: TextStyle(fontSize: 13, height: 1.5, color: theme.colorScheme.onSurface.withValues(alpha: 0.85)),
+                '在 App 内直接打开贝锐向日葵认证中心，输入短信验证码或密码拼图，登录成功后 App 自动捕获凭据秒进控制台，免切屏烦恼！',
+                style: TextStyle(fontSize: 12.5, height: 1.45, color: theme.colorScheme.onSurface.withValues(alpha: 0.85)),
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
-                height: 48,
+                height: 46,
                 child: FilledButton.icon(
-                  onPressed: _openWebLogin,
+                  onPressed: () => _openWebLogin(),
                   style: FilledButton.styleFrom(
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  icon: const Icon(Icons.open_in_browser_rounded, size: 20),
-                  label: const Text('立即开始网页免扫码登录', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  icon: const Icon(Icons.open_in_browser_rounded, size: 19),
+                  label: const Text('立即开始内置登录', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                 ),
               ),
             ],
           ),
         ),
 
-        const SizedBox(height: 24),
+        const SizedBox(height: 20),
 
-        // 特性说明三步卡片
+        // 分割线与说明
+        Row(
+          children: [
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(
+                '切换登录线路 (直达或外部浏览器)',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.bold),
+              ),
+            ),
+            const Expanded(child: Divider()),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '点击卡片在 App 内置打开该线路；点击右侧 ↗ 图标直接调起手机默认浏览器：',
+          style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600, height: 1.4),
+        ),
+        const SizedBox(height: 12),
+
+        // 线路一
+        _buildLoginRouteCard(
+          theme: theme,
+          title: '线路一：贝锐统一通行证 (推荐)',
+          subtitle: '官方移动端统一登录页面，支持手机验证码/密码',
+          icon: Icons.verified_user_rounded,
+          url: 'https://passport.oray.com/login/',
+        ),
+        const SizedBox(height: 10),
+
+        // 线路二
+        _buildLoginRouteCard(
+          theme: theme,
+          title: '线路二：向日葵管理中心',
+          subtitle: '向日葵专属后台登录入口，适配远控设备',
+          icon: Icons.devices_rounded,
+          url: 'https://sunlogin.oray.com/passport/login',
+        ),
+        const SizedBox(height: 10),
+
+        // 线路三
+        _buildLoginRouteCard(
+          theme: theme,
+          title: '线路三：贝锐标准控制台',
+          subtitle: '贝锐全业务控制中心直连登录入口',
+          icon: Icons.admin_panel_settings_rounded,
+          url: 'https://console.oray.com/passport/login',
+        ),
+
+        const SizedBox(height: 16),
+
+        // 切回检测提示与操作
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '为什么推荐网页免扫码登录？',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5, color: theme.colorScheme.onSurface),
+              Row(
+                children: [
+                  Icon(Icons.sync_rounded, color: theme.colorScheme.primary, size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '已在外部浏览器登录完成？',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              _buildFeatureRow(theme, Icons.mobile_friendly_rounded, '单机闭环', '无需第二台手机或电脑，单台设备即可完成认证'),
+              const SizedBox(height: 6),
+              Text(
+                '在外部浏览器登录完成后切回本 App 即可自动尝试检测；若未自动触发，可点击下方按钮：',
+                style: TextStyle(fontSize: 11.5, color: Colors.grey.shade700, height: 1.4),
+              ),
               const SizedBox(height: 10),
-              _buildFeatureRow(theme, Icons.flash_on_rounded, '全自动进入', '输入短信验证码或密码后，系统自动拦截跳转并拉取插座设备'),
-              const SizedBox(height: 10),
-              _buildFeatureRow(theme, Icons.security_rounded, '官方直连', '直接与贝锐官方统一通行证交互，凭据本地安全加密存储'),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () => _checkExternalAuthOnResume(isManual: true),
+                  icon: const Icon(Icons.refresh_rounded, size: 16),
+                  label: const Text('立即手动检测认证信息', style: TextStyle(fontSize: 12.5)),
+                ),
+              ),
             ],
           ),
         ),
 
-        const SizedBox(height: 18),
+        const SizedBox(height: 16),
 
         // 高级选填：手动粘贴 Token 折叠项
         ExpansionTile(
@@ -435,23 +539,62 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     );
   }
 
-  Widget _buildFeatureRow(ThemeData theme, IconData icon, String title, String desc) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, size: 18, color: theme.colorScheme.primary),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+  // 线路卡片组件
+  Widget _buildLoginRouteCard({
+    required ThemeData theme,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required String url,
+  }) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => _openWebLogin(url, title),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
             children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5)),
-              const SizedBox(height: 1),
-              Text(desc, style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: theme.colorScheme.primary, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                tooltip: '在系统浏览器中打开',
+                onPressed: () => _launchExternalBrowser(url, title),
+              ),
             ],
           ),
         ),
-      ],
+      ),
     );
   }
 

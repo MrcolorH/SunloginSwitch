@@ -289,7 +289,7 @@ class SunloginService {
       for (final entry in cookies.entries) {
         final k = entry.key.toLowerCase();
         final v = entry.value.trim();
-        if ((k == 'access_token' || k == 'token' || k.endsWith('_token')) && v.length > 20) {
+        if ((k == 'access_token' || k == 'token' || k.endsWith('_token') || k.contains('token')) && v.length > 20) {
           try {
             await loginWithDirectToken(v, '网页登录用户');
             return true;
@@ -299,10 +299,22 @@ class SunloginService {
     }
 
     // 3. 若有 sessionId 或 cookies 中的 _s_id_
-    final sId = sessionId ?? cookies?['_s_id_'] ?? cookies?['s_id'];
-    if (sId != null && sId.trim().isNotEmpty) {
+    String? foundSessionId = sessionId;
+    if (foundSessionId == null && cookies != null) {
+      for (final e in cookies.entries) {
+        final k = e.key.toLowerCase().replaceAll('.', '_');
+        if (k == '_s_id_' || k == 's_id' || k.contains('_s_id') || k == 'sid') {
+          if (e.value.trim().isNotEmpty) {
+            foundSessionId = e.value.trim();
+            break;
+          }
+        }
+      }
+    }
+
+    if (foundSessionId != null && foundSessionId.isNotEmpty) {
       try {
-        final t = await exchangeSessionToken(sId.trim());
+        final t = await exchangeSessionToken(foundSessionId);
         await loginWithDirectToken(t, '网页登录用户');
         return true;
       } catch (_) {}

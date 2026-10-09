@@ -264,3 +264,160 @@ class SmartWorkflowConfig {
     );
   }
 }
+
+/// 手机本地定时任务模型
+class LocalTimerItem {
+  final String id;
+  final String sn;
+  String name;
+  int hour;      // 0-23
+  int minute;    // 0-59
+  int action;    // 1=开启, 0=关闭
+  int repeat;    // 0=仅一次, 127=每天, 62=工作日, 65=周末, -1=自定义
+  List<int> weekDays; // 1=周一 .. 7=周日
+  bool isEnabled;
+  String? lastExecutedDate; // 格式: yyyy-MM-dd HH:mm，避免同分钟重复触发
+
+  LocalTimerItem({
+    required this.id,
+    required this.sn,
+    this.name = '定时任务',
+    required this.hour,
+    required this.minute,
+    required this.action,
+    this.repeat = 127,
+    List<int>? weekDays,
+    this.isEnabled = true,
+    this.lastExecutedDate,
+  }) : weekDays = weekDays ?? _calcWeekDaysFromRepeat(repeat);
+
+  static List<int> _calcWeekDaysFromRepeat(int repeat) {
+    if (repeat == 127) return [1, 2, 3, 4, 5, 6, 7];
+    if (repeat == 62) return [1, 2, 3, 4, 5];
+    if (repeat == 65) return [6, 7];
+    if (repeat == 0) return [];
+    return [1, 2, 3, 4, 5, 6, 7];
+  }
+
+  String get timeFormatted {
+    final h = hour.toString().padLeft(2, '0');
+    final m = minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+
+  String get repeatSummary {
+    if (repeat == 0 || weekDays.isEmpty) return '仅一次';
+    if (weekDays.length == 7) return '每天';
+    final isWorkdays = weekDays.length == 5 &&
+        weekDays.contains(1) &&
+        weekDays.contains(2) &&
+        weekDays.contains(3) &&
+        weekDays.contains(4) &&
+        weekDays.contains(5);
+    if (isWorkdays) return '工作日';
+
+    final isWeekend = weekDays.length == 2 && weekDays.contains(6) && weekDays.contains(7);
+    if (isWeekend) return '周末';
+
+    const dayNames = {
+      1: '周一',
+      2: '周二',
+      3: '周三',
+      4: '周四',
+      5: '周五',
+      6: '周六',
+      7: '周日',
+    };
+    final sorted = List<int>.from(weekDays)..sort();
+    return sorted.map((d) => dayNames[d] ?? '').join('、');
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'sn': sn,
+    'name': name,
+    'hour': hour,
+    'minute': minute,
+    'action': action,
+    'repeat': repeat,
+    'weekDays': weekDays,
+    'isEnabled': isEnabled,
+    'lastExecutedDate': lastExecutedDate,
+  };
+
+  factory LocalTimerItem.fromJson(Map<String, dynamic> json) {
+    final rep = int.tryParse(json['repeat']?.toString() ?? '') ?? 127;
+    List<int> days = [];
+    if (json['weekDays'] is List) {
+      days = (json['weekDays'] as List).map((e) => int.tryParse(e.toString()) ?? 0).where((e) => e >= 1 && e <= 7).toList();
+    } else {
+      days = _calcWeekDaysFromRepeat(rep);
+    }
+
+    return LocalTimerItem(
+      id: json['id']?.toString() ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      sn: json['sn']?.toString() ?? '',
+      name: json['name']?.toString() ?? '定时任务',
+      hour: int.tryParse(json['hour']?.toString() ?? '') ?? 0,
+      minute: int.tryParse(json['minute']?.toString() ?? '') ?? 0,
+      action: int.tryParse(json['action']?.toString() ?? '') ?? 0,
+      repeat: rep,
+      weekDays: days,
+      isEnabled: json['isEnabled'] == true || json['isEnabled'] == 1,
+      lastExecutedDate: json['lastExecutedDate']?.toString(),
+    );
+  }
+}
+
+/// 手机本地倒计时任务模型
+class LocalCountdownItem {
+  final String sn;
+  final int action; // 1=开, 0=关
+  final int totalSeconds;
+  final int endTimestamp; // 毫秒时间戳
+  bool isEnabled;
+
+  LocalCountdownItem({
+    required this.sn,
+    required this.action,
+    required this.totalSeconds,
+    required this.endTimestamp,
+    this.isEnabled = true,
+  });
+
+  int get remainingSeconds {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final diff = (endTimestamp - now) ~/ 1000;
+    return diff > 0 ? diff : 0;
+  }
+
+  String get remainingFormatted {
+    final rem = remainingSeconds;
+    final h = rem ~/ 3600;
+    final m = (rem % 3600) ~/ 60;
+    final s = rem % 60;
+    if (h > 0) {
+      return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    }
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  Map<String, dynamic> toJson() => {
+    'sn': sn,
+    'action': action,
+    'totalSeconds': totalSeconds,
+    'endTimestamp': endTimestamp,
+    'isEnabled': isEnabled,
+  };
+
+  factory LocalCountdownItem.fromJson(Map<String, dynamic> json) {
+    return LocalCountdownItem(
+      sn: json['sn']?.toString() ?? '',
+      action: int.tryParse(json['action']?.toString() ?? '') ?? 0,
+      totalSeconds: int.tryParse(json['totalSeconds']?.toString() ?? '') ?? 0,
+      endTimestamp: int.tryParse(json['endTimestamp']?.toString() ?? '') ?? 0,
+      isEnabled: json['isEnabled'] == true || json['isEnabled'] == 1,
+    );
+  }
+}
+

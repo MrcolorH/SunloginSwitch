@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/plug_models.dart';
+import '../services/local_timer_service.dart';
 import '../services/storage_service.dart';
 import '../services/sunlogin_service.dart';
 import '../widgets/energy_chart_sheet.dart';
@@ -28,6 +29,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _isLoading = false;
   bool _isSwitching = false;
   Timer? _pollingTimer;
+  StreamSubscription<LocalTimerTriggerEvent>? _timerEventSub;
 
   // 智能充饱断电计时追踪
   int _lowPowerDurationSeconds = 0;
@@ -36,19 +38,67 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _initLocalTimerListener();
     _checkInitAndLoad();
+  }
+
+  void _initLocalTimerListener() {
+    _timerEventSub = LocalTimerService.instance.eventStream.listen((event) {
+      if (!mounted) return;
+      if (_sn == event.sn) {
+        if (event.success) {
+          setState(() {
+            _isOpen = event.action;
+            if (!event.action) {
+              _electric = const PlugElectric(power: 0, voltage: 220, current: 0);
+            }
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('【${event.title}已触发】已自动${event.action ? "开启" : "关闭"}插座'),
+              backgroundColor: Colors.teal.shade700,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          _pollRealtimeData();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('【${event.title}执行失败】${event.error ?? "网络通信异常"}'),
+              backgroundColor: Colors.red.shade700,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    });
+    LocalTimerService.instance.addListener(_updateTimerStatus);
+  }
+
+  void _updateTimerStatus() {
+    if (mounted && _sn != null) {
+      final hasLocal = LocalTimerService.instance.hasActiveTimer(_sn!);
+      if (_hasTimer != hasLocal) {
+        setState(() => _hasTimer = hasLocal);
+      }
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pollingTimer?.cancel();
+    _timerEventSub?.cancel();
+    LocalTimerService.instance.removeListener(_updateTimerStatus);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // 唤醒时快速检查是否有到期未触发的本地定时
+      LocalTimerService.instance.checkCatchUp();
+
       // 仅当当前 HomePage 处于最顶层可见页面且已成功登录绑定时才触发前台刷新
       // 绝不在上面打开了 LoginPage 时刷新，避免切回 App 时误触发未登录拦截
       final isCurrent = ModalRoute.of(context)?.isCurrent ?? false;
@@ -152,11 +202,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) {
         final status = results[0] as bool;
         final electric = results[1] as PlugElectric;
+        final cloudHasTimer = results[3] as bool;
+        final localHasTimer = _sn != null && LocalTimerService.instance.hasActiveTimer(_sn!);
         setState(() {
           _isOpen = (electric.power > 0.5) ? true : status;
           _electric = electric;
           _energyStats = results[2] as PlugEnergyStats;
-          _hasTimer = results[3] as bool;
+          _hasTimer = localHasTimer || cloudHasTimer;
         });
       }
     } catch (e) {
@@ -288,6 +340,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final activeCountdown = _sn != null ? LocalTimerService.instance.getCountdownForDevice(_sn!) : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -380,24 +433,77 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 ActionChip(
                   avatar: Icon(
-                    _hasTimer ? Icons.timer : Icons.timer_outlined,
+                    _hasTimer ? Icons.alarm_on : Icons.alarm,
                     size: 16,
-                    color: _hasTimer ? Colors.blue : Colors.grey,
+                    color: _hasTimer ? Colors.teal : Colors.grey,
                   ),
                   label: Text(
                     _hasTimer ? '定时任务生效中' : '设置定时/工作流',
                     style: TextStyle(
                       fontSize: 12,
-                      color: _hasTimer ? Colors.blue.shade800 : Colors.grey.shade800,
+                      color: _hasTimer ? Colors.teal.shade800 : Colors.grey.shade800,
                       fontWeight: _hasTimer ? FontWeight.bold : FontWeight.normal,
                     ),
                   ),
-                  backgroundColor: _hasTimer ? Colors.blue.shade50 : (isDark ? Colors.grey.shade800 : Colors.grey.shade100),
+                  backgroundColor: _hasTimer ? Colors.teal.shade50 : (isDark ? Colors.grey.shade800 : Colors.grey.shade100),
                   onPressed: _openTimerWorkflow,
                 ),
               ],
             ),
-            const SizedBox(height: 36),
+
+            // 本地倒计时活跃提示横幅
+            if (activeCountdown != null && activeCountdown.isEnabled && activeCountdown.remainingSeconds > 0) ...[
+              const SizedBox(height: 14),
+              InkWell(
+                onTap: _openTimerWorkflow,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: activeCountdown.action == 1 ? Colors.green.shade50 : Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: activeCountdown.action == 1 ? Colors.green.shade300 : Colors.orange.shade300,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.timelapse,
+                        size: 20,
+                        color: activeCountdown.action == 1 ? Colors.green.shade800 : Colors.orange.shade800,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '本地倒计时：将在 ${activeCountdown.remainingFormatted} 后自动${activeCountdown.action == 1 ? "开启" : "关闭"}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: activeCountdown.action == 1 ? Colors.green.shade900 : Colors.orange.shade900,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          LocalTimerService.instance.cancelCountdown(_sn!);
+                          _refreshAllData();
+                        },
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          foregroundColor: Colors.red.shade700,
+                        ),
+                        child: const Text('取消'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 32),
 
             // 2. 巨型中央开关按钮
             Center(
