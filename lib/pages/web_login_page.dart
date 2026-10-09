@@ -64,6 +64,9 @@ class _WebLoginPageState extends State<WebLoginPage> {
   final Set<String> _failedRouteUrls = {};
   Timer? _sessionDetectTimer;
 
+  final Set<String> _testedTokens = {};
+  bool _isVerifyingToken = false;
+
   @override
   void initState() {
     super.initState();
@@ -79,10 +82,11 @@ class _WebLoginPageState extends State<WebLoginPage> {
     super.dispose();
   }
 
-  /// 启动后台静默会话检测，每 1.5 秒尝试一次凭据捕获，静默不打扰用户
+  /// 启动后台静默会话检测，每 1.5 秒尝试一次凭据捕获，并保持拦截器在线
   void _startBackgroundSessionWatcher() {
     _sessionDetectTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) async {
       if (_hasSucceeded || !mounted) return;
+      _injectNetworkInterceptor();
       final success = await _checkAndExtract(isManual: false);
       if (success) {
         _onLoginSuccess();
@@ -90,19 +94,81 @@ class _WebLoginPageState extends State<WebLoginPage> {
     });
   }
 
+  Future<void> _injectNetworkInterceptor() async {
+    try {
+      await _controller.runJavaScript(_interceptorScript);
+    } catch (_) {}
+  }
+
+  void _handleTokenInterceptorMessage(String message) {
+    if (_hasSucceeded || !mounted) return;
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded is Map && decoded['token'] != null) {
+        final token = decoded['token'].toString();
+        _tryHandleDetectedToken(token, decoded['origin']?.toString() ?? '网络拦截');
+      }
+    } catch (_) {
+      if (message.length > 20) {
+        _tryHandleDetectedToken(message, '直接文本拦截');
+      }
+    }
+  }
+
+  Future<bool> _tryHandleDetectedToken(String rawToken, String origin) async {
+    if (_hasSucceeded || !mounted) return true;
+    String clean = rawToken.trim();
+    if (clean.toLowerCase().startsWith('bearer ')) {
+      clean = clean.substring(7).trim();
+    }
+    // 过滤常见非法/杂质字符
+    if (clean.length < 20 || clean.contains(' ') || clean.contains(';') || clean.contains('"')) {
+      return false;
+    }
+    // 过滤阿里云 WAF 与 CDN 追踪 Cookie
+    if (clean.startsWith('7ae1d')) {
+      return false;
+    }
+    if (_testedTokens.contains(clean)) return false;
+    _testedTokens.add(clean);
+
+    if (_isVerifyingToken) return false;
+    _isVerifyingToken = true;
+
+    try {
+      debugPrint('👉 [Token拦截器] 捕获到候选 Token (来源: $origin)，长度: ${clean.length}，正在向向日葵验证...');
+      await _service.loginWithDirectToken(clean, '网页自动拦截用户');
+      _onLoginSuccess();
+      return true;
+    } catch (e) {
+      debugPrint('⚠️ [Token拦截器] 候选 Token 验证未通过 ($origin): $e');
+      return false;
+    } finally {
+      _isVerifyingToken = false;
+    }
+  }
+
   void _initWebViewController() {
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel(
+        'TokenInterceptor',
+        onMessageReceived: (JavaScriptMessage message) {
+          _handleTokenInterceptorMessage(message.message);
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (progress) {
             if (mounted) setState(() => _progress = progress);
           },
           onPageStarted: (url) {
+            _injectNetworkInterceptor();
             _parseUrlForTokens(url);
           },
           onPageFinished: (url) async {
             if (mounted) setState(() => _progress = 100);
+            await _injectNetworkInterceptor();
             _parseUrlForTokens(url);
             // 页面加载完成后静默检测：如果有认证信息就跳回，如果没有就不做任何提示，保留在页面上
             final success = await _checkAndExtract(isManual: false);
@@ -124,6 +190,7 @@ class _WebLoginPageState extends State<WebLoginPage> {
           onUrlChange: (change) {
             final u = change.url ?? '';
             if (u.isNotEmpty) {
+              _injectNetworkInterceptor();
               _parseUrlForTokens(u);
             }
           },
@@ -283,12 +350,22 @@ class _WebLoginPageState extends State<WebLoginPage> {
 
       // 2. 从 WebViewCookieManager 获取所有相关域名的 Cookie（包括 HttpOnly 的 _s_id_）
       final domains = [
-        Uri.parse('https://passport.oray.com'),
-        Uri.parse('https://sunlogin.oray.com'),
-        Uri.parse('https://console.oray.com'),
-        Uri.parse('https://oray.com'),
-        Uri.parse('https://oray.net'),
+        Uri.parse('https://passport.oray.com/'),
+        Uri.parse('https://sunlogin.oray.com/'),
+        Uri.parse('https://console.oray.com/'),
+        Uri.parse('https://oray.com/'),
+        Uri.parse('https://oray.net/'),
       ];
+
+      try {
+        final currentUrl = await _controller.currentUrl();
+        if (currentUrl != null && currentUrl.isNotEmpty) {
+          final uri = Uri.tryParse(currentUrl);
+          if (uri != null) {
+            domains.insert(0, uri);
+          }
+        }
+      } catch (_) {}
 
       for (final domain in domains) {
         try {
@@ -352,15 +429,28 @@ class _WebLoginPageState extends State<WebLoginPage> {
 
       if (isManual && mounted) {
         _manualCheckFailCount++;
+        String currentUrl = '';
+        try {
+          currentUrl = await _controller.currentUrl() ?? '';
+        } catch (_) {}
+
+        final bool isAlreadyInConsole = currentUrl.contains('console') ||
+            currentUrl.contains('sunlogin.oray.com') ||
+            !currentUrl.contains('/login/');
+
+        if (!mounted) return false;
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              _manualCheckFailCount >= 2
-                  ? '未检测到有效登录凭据。若网页无法登录，可点击右上角切换其他线路或改用双机扫码'
-                  : '未检测到有效登录状态，请先在下方网页中完成登录验证',
+              isAlreadyInConsole
+                  ? '⚡ 已连接到控制台！请在网页内随意点击任意菜单或插座，触发数据请求即可秒级自动捕获登入'
+                  : (_manualCheckFailCount >= 2
+                      ? '未检测到有效登录凭据。若网页无法登录，可点击右上角切换其他线路或改用双机扫码'
+                      : '未检测到有效登录状态，请先在下方网页中完成登录验证'),
             ),
-            duration: const Duration(seconds: 3),
-            action: _manualCheckFailCount >= 2
+            duration: const Duration(seconds: 4),
+            action: _manualCheckFailCount >= 2 && !isAlreadyInConsole
                 ? SnackBarAction(
                     label: '去扫码',
                     textColor: Colors.amber,
@@ -446,9 +536,21 @@ class _WebLoginPageState extends State<WebLoginPage> {
 
   /// 用户点击【已登录？点此进入】时的处理
   Future<void> _handleManualCheck() async {
-    final success = await _checkAndExtract(isManual: true);
-    if (success) {
-      _onLoginSuccess();
+    setState(() => _isChecking = true);
+    try {
+      await _injectNetworkInterceptor();
+      try {
+        await _controller.runJavaScript('if (window.__scanAndReportTokens) window.__scanAndReportTokens();');
+      } catch (_) {}
+
+      final success = await _checkAndExtract(isManual: true);
+      if (success) {
+        _onLoginSuccess();
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isChecking = false);
+      }
     }
   }
 
@@ -633,4 +735,152 @@ class _WebLoginPageState extends State<WebLoginPage> {
       ),
     );
   }
+
+  static const String _interceptorScript = r'''
+    (function() {
+      function notify(token, origin) {
+        if (!token || typeof token !== 'string') return;
+        var t = token.trim();
+        if (t.toLowerCase().startsWith('bearer ')) {
+          t = t.substring(7).trim();
+        }
+        if (t.length > 20 && t.indexOf(' ') === -1 && t.indexOf('"') === -1 && !t.startsWith('7ae1d')) {
+          try {
+            var payload = JSON.stringify({ token: t, origin: origin });
+            if (window.TokenInterceptor && window.TokenInterceptor.postMessage) {
+              window.TokenInterceptor.postMessage(payload);
+            } else if (typeof TokenInterceptor !== 'undefined' && TokenInterceptor.postMessage) {
+              TokenInterceptor.postMessage(payload);
+            }
+          } catch (e) {}
+        }
+      }
+
+      function parseStringForTokens(str, origin) {
+        if (!str || typeof str !== 'string') return;
+        // 1. 匹配 JWT (eyJ...)
+        var jwtMatches = str.match(/eyJ[A-Za-z0-9-_=]+\.eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+/g);
+        if (jwtMatches) {
+          for (var i = 0; i < jwtMatches.length; i++) {
+            notify(jwtMatches[i], origin + ':jwt');
+          }
+        }
+        // 2. 匹配 JSON 中 token / access_token 键
+        var tokenKvMatches = str.match(/["'](?:access_)?token["']\s*:\s*["']([^"']{20,})["']/gi);
+        if (tokenKvMatches) {
+          for (var j = 0; j < tokenKvMatches.length; j++) {
+            var m = tokenKvMatches[j].match(/["']([^"']{20,})["']$/);
+            if (m && m[1]) {
+              notify(m[1], origin + ':token_kv');
+            }
+          }
+        }
+      }
+
+      window.__scanAndReportTokens = function() {
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            var v = localStorage.getItem(k);
+            if (k && k.toLowerCase().indexOf('token') >= 0 && v && v.length > 20) {
+              notify(v, 'localStorage:' + k);
+            }
+            parseStringForTokens(v, 'localStorage:' + k);
+          }
+        } catch (e) {}
+        try {
+          for (var j = 0; j < sessionStorage.length; j++) {
+            var sk = sessionStorage.key(j);
+            var sv = sessionStorage.getItem(sk);
+            if (sk && sk.toLowerCase().indexOf('token') >= 0 && sv && sv.length > 20) {
+              notify(sv, 'sessionStorage:' + sk);
+            }
+            parseStringForTokens(sv, 'sessionStorage:' + sk);
+          }
+        } catch (e) {}
+        try {
+          if (window.__INITIAL_STATE__) parseStringForTokens(JSON.stringify(window.__INITIAL_STATE__), 'initial_state');
+          if (window.__STORE__) parseStringForTokens(JSON.stringify(window.__STORE__), 'store');
+        } catch(e) {}
+      };
+
+      if (!window.__sunlogin_hooked) {
+        window.__sunlogin_hooked = true;
+
+        // 劫持 window.fetch
+        if (window.fetch) {
+          var rawFetch = window.fetch;
+          window.fetch = function(input, init) {
+            try {
+              if (init && init.headers) {
+                var h = init.headers;
+                if (h instanceof Headers) {
+                  var auth = h.get('authorization') || h.get('Authorization');
+                  if (auth) notify(auth, 'fetch_header_auth');
+                } else if (typeof h === 'object') {
+                  for (var key in h) {
+                    if (key.toLowerCase() === 'authorization' || key.toLowerCase().indexOf('token') >= 0) {
+                      notify(h[key], 'fetch_header:' + key);
+                    }
+                  }
+                }
+              }
+              var urlStr = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+              if (urlStr) {
+                var m = urlStr.match(/[?&](?:access_)?token=([^&#]+)/i);
+                if (m && m[1]) notify(decodeURIComponent(m[1]), 'fetch_url_param');
+              }
+            } catch (e) {}
+
+            return rawFetch.apply(this, arguments).then(function(res) {
+              try {
+                res.clone().text().then(function(txt) {
+                  parseStringForTokens(txt, 'fetch_response');
+                }).catch(function() {});
+              } catch (e) {}
+              return res;
+            });
+          };
+        }
+
+        // 劫持 XMLHttpRequest
+        if (window.XMLHttpRequest) {
+          var rawOpen = XMLHttpRequest.prototype.open;
+          var rawSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+          var rawSend = XMLHttpRequest.prototype.send;
+
+          XMLHttpRequest.prototype.open = function(method, url) {
+            try {
+              if (url) {
+                var m = url.match(/[?&](?:access_)?token=([^&#]+)/i);
+                if (m && m[1]) notify(decodeURIComponent(m[1]), 'xhr_url_param');
+              }
+            } catch (e) {}
+            return rawOpen.apply(this, arguments);
+          };
+
+          XMLHttpRequest.prototype.setRequestHeader = function(header, val) {
+            try {
+              if (header.toLowerCase() === 'authorization' || header.toLowerCase().indexOf('token') >= 0) {
+                notify(val, 'xhr_header:' + header);
+              }
+            } catch (e) {}
+            return rawSetHeader.apply(this, arguments);
+          };
+
+          XMLHttpRequest.prototype.send = function() {
+            var self = this;
+            this.addEventListener('load', function() {
+              try {
+                parseStringForTokens(self.responseText, 'xhr_response');
+              } catch (e) {}
+            });
+            return rawSend.apply(this, arguments);
+          };
+        }
+      }
+
+      window.__scanAndReportTokens();
+    })();
+  ''';
 }
